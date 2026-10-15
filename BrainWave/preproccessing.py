@@ -4,12 +4,12 @@ Github: tumor region. It uses OpenCV to find the contours of the tumor and crop 
 Github: https://github.com/masoudnick/Brain-Tumor-MRI-Classification
 """
 
-import numpy as np 
-from tqdm import tqdm
-import cv2
 import os
-import imutils
 
+import cv2
+import imutils 
+import numpy as np
+from tqdm import tqdm
 
 
 def crop_img(img):
@@ -41,14 +41,15 @@ def crop_img(img):
 	return new_img
 	
 if __name__ == "__main__":
-	training = "dataset/Training"
-	testing = "dataset/Testing"
+	BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+	training = os.path.join(BASE_DIR, "dataset/Training")
+	testing = os.path.join(BASE_DIR, "dataset/Testing")
 	training_dir = os.listdir(training)
 	testing_dir = os.listdir(testing)
 	IMG_SIZE = 256
 
 	for dir in training_dir:
-		save_path = 'cleaned/Training/'+ dir
+		save_path = os.path.join(BASE_DIR, 'cleaned/Training/'+ dir)
 		path = os.path.join(training,dir)
 		image_dir = os.listdir(path)
 		for img in image_dir:
@@ -60,7 +61,7 @@ if __name__ == "__main__":
 			cv2.imwrite(save_path+'/'+img, new_img)
 	
 	for dir in testing_dir:
-		save_path = 'cleaned/Testing/'+ dir
+		save_path = os.path.join(BASE_DIR, 'cleaned/Testing/'+ dir)
 		path = os.path.join(testing,dir)
 		image_dir = os.listdir(path)
 		for img in image_dir:
