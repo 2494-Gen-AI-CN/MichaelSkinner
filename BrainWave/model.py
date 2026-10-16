@@ -41,6 +41,10 @@ test_ds = keras.utils.image_dataset_from_directory(
 class_names = train_ds.class_names
 print("Classes:", class_names)
 
+# glioma (index 0) is the weakest class — upweight it to improve glioma/meningioma separation
+class_weight = {i: 1.0 for i in range(len(class_names))}
+class_weight[class_names.index("glioma")] = 2.0
+
 AUTOTUNE = tf.data.AUTOTUNE
 train_ds = train_ds.cache().shuffle(1000).prefetch(AUTOTUNE)
 val_ds = val_ds.cache().prefetch(AUTOTUNE)
@@ -52,6 +56,8 @@ augment = keras.Sequential([
     keras.layers.RandomFlip("horizontal"),
     keras.layers.RandomRotation(0.1),
     keras.layers.RandomZoom(0.1),
+    keras.layers.RandomBrightness(0.2),
+    keras.layers.RandomContrast(0.2),
 ], name="augmentation")
 
 # ── Model ─────────────────────────────────────────────────────────────────────
@@ -87,6 +93,7 @@ history = model.fit(
     train_ds,
     epochs=EPOCHS_FROZEN,
     validation_data=val_ds,
+    class_weight=class_weight,
     callbacks=[
         keras.callbacks.EarlyStopping(patience=3, restore_best_weights=True),
     ],
@@ -109,6 +116,7 @@ history_finetune = model.fit(
     train_ds,
     epochs=EPOCHS_FINETUNE,
     validation_data=val_ds,
+    class_weight=class_weight,
     callbacks=[
         keras.callbacks.EarlyStopping(patience=3, restore_best_weights=True),
     ],
