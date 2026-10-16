@@ -62,7 +62,7 @@ augment = keras.Sequential([
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 
-base_model = keras.applications.EfficientNetB0(
+base_model = keras.applications.DenseNet121(
     include_top=False,
     weights="imagenet",
     input_shape=(IMG_SIZE, IMG_SIZE, 3),
@@ -71,7 +71,7 @@ base_model.trainable = False  # freeze pretrained weights for first training pha
 
 inputs = keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
 x = augment(inputs)
-# EfficientNetB0 expects pixel values in [0, 255]; no manual rescaling needed
+x = keras.applications.densenet.preprocess_input(x)
 x = base_model(x, training=False)
 x = keras.layers.GlobalAveragePooling2D()(x)
 x = keras.layers.Dense(128, activation="relu")(x)
@@ -102,8 +102,8 @@ history = model.fit(
 # ── Phase 2: fine-tune top layers of base model ───────────────────────────────
 
 base_model.trainable = True
-# only unfreeze the last 20 layers
-for layer in base_model.layers[:-20]:
+# only unfreeze the last 50 layers
+for layer in base_model.layers[:-50]:
     layer.trainable = False
 
 model.compile(

@@ -68,7 +68,8 @@ instance/
 
 # Scrapy stuff:
 .scrapy
-.claude/
+dataset/
+cleaned/
 # Sphinx documentation
 docs/_build/
 

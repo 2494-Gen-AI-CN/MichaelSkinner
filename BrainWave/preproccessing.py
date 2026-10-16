@@ -37,8 +37,22 @@ def crop_img(img):
 	extBot = tuple(c[c[:, :, 1].argmax()][0])
 	ADD_PIXELS = 0
 	new_img = img[extTop[1]-ADD_PIXELS:extBot[1]+ADD_PIXELS, extLeft[0]-ADD_PIXELS:extRight[0]+ADD_PIXELS].copy()
-	
+
 	return new_img
+
+
+def normalize_contrast(img):
+	"""
+	Applies CLAHE to the L channel of the image to standardize contrast across
+	different scanners and sources, forcing the model to learn structural features
+	rather than brightness-based shortcuts.
+	"""
+	img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+	lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+	clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+	lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+	img_bgr = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+	return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 	
 if __name__ == "__main__":
 	BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -54,20 +68,24 @@ if __name__ == "__main__":
 		image_dir = os.listdir(path)
 		for img in image_dir:
 			image = cv2.imread(os.path.join(path,img))
-			new_img = crop_img(image)
+			image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+			new_img = crop_img(image_rgb)
+			new_img = normalize_contrast(new_img)
 			new_img = cv2.resize(new_img,(IMG_SIZE,IMG_SIZE))
 			if not os.path.exists(save_path):
 				os.makedirs(save_path)
-			cv2.imwrite(save_path+'/'+img, new_img)
-	
+			cv2.imwrite(save_path+'/'+img, cv2.cvtColor(new_img, cv2.COLOR_RGB2BGR))
+
 	for dir in testing_dir:
 		save_path = os.path.join(BASE_DIR, 'cleaned/Testing/'+ dir)
 		path = os.path.join(testing,dir)
 		image_dir = os.listdir(path)
 		for img in image_dir:
 			image = cv2.imread(os.path.join(path,img))
-			new_img = crop_img(image)
+			image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+			new_img = crop_img(image_rgb)
+			new_img = normalize_contrast(new_img)
 			new_img = cv2.resize(new_img,(IMG_SIZE,IMG_SIZE))
 			if not os.path.exists(save_path):
 				os.makedirs(save_path)
-			cv2.imwrite(save_path+'/'+img, new_img)
+			cv2.imwrite(save_path+'/'+img, cv2.cvtColor(new_img, cv2.COLOR_RGB2BGR))
