@@ -10,29 +10,63 @@ def _sanitize(value: str) -> str:
 
 
 def _norm(name: str) -> str:
-    """Normalize a player name for fuzzy matching."""
     name = name.lower()
     name = re.sub(r"['\.\-]", "", name)
     name = re.sub(r"\s+(jr|sr|ii|iii|iv)$", "", name)
     return name.strip()
 
 
+def norm_player_name(name: str) -> str:
+    """Public normalizer — use to key into sleeper_player_positions()."""
+    return _norm(name)
+
+
+def pos_group(raw_pos: str) -> str:
+    """Map a raw position string (PG, SF, C …) to a display group."""
+    p = (raw_pos or "").upper()
+    if p in ("PG", "SG", "G"):
+        return "Guards"
+    if p in ("SF", "PF", "F", "G-F", "F-G", "SG-SF", "PG-SG"):
+        return "Forwards"
+    if p in ("C", "F-C", "C-F", "PF-C"):
+        return "Centers"
+    return "Other"
+
+
 # ── Sleeper ────────────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _sleeper_raw_players() -> dict:
+    """Single cached fetch of all active NBA players from Sleeper."""
+    resp = requests.get(f"{SLEEPER_BASE}/players/nba", timeout=20)
+    resp.raise_for_status()
+    return {pid: info for pid, info in resp.json().items() if info.get("active")}
+
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def sleeper_player_map() -> dict:
     """Fetch all active NBA players from Sleeper → {player_id: full_name}."""
-    resp = requests.get(f"{SLEEPER_BASE}/players/nba", timeout=20)
-    resp.raise_for_status()
     out = {}
-    for pid, info in resp.json().items():
-        if not info.get("active"):
-            continue
+    for pid, info in _sleeper_raw_players().items():
         full = info.get("full_name") or (
             f"{info.get('first_name', '')} {info.get('last_name', '')}".strip()
         )
         if full:
             out[pid] = full
+    return out
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def sleeper_player_positions() -> dict:
+    """Returns {norm_player_name: raw_position} for all active NBA players."""
+    out = {}
+    for pid, info in _sleeper_raw_players().items():
+        full = info.get("full_name") or (
+            f"{info.get('first_name', '')} {info.get('last_name', '')}".strip()
+        )
+        pos = info.get("position", "")
+        if full:
+            out[_norm(full)] = pos
     return out
 
 

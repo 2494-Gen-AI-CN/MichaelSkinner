@@ -5,12 +5,16 @@ import pandas as pd
 
 from data_fetcher import get_player_game_logs, get_season_stats
 from evaluator import FantasyEvaluator, TRADE_STAT_COLS
+from rookies import get_rookie_projections
 from league_sync import (
     get_espn_league_teams,
     get_sleeper_league_teams,
     get_sleeper_leagues,
     get_sleeper_user,
     match_names,
+    norm_player_name,
+    pos_group,
+    sleeper_player_positions,
 )
 from projections import ProjectionEngine
 from web_projections import (
@@ -130,8 +134,15 @@ with st.spinner("Building 2026-27 projections..."):
         except Exception:
             proj_prev = None
 
-        engine    = ProjectionEngine(proj_base, proj_prev, scoring)
-        proj_df   = engine.build()
+        engine   = ProjectionEngine(proj_base, proj_prev, scoring)
+        proj_df  = engine.build()
+
+        # Inject 2026 rookies (no NBA API history) and re-rank
+        rookie_df = get_rookie_projections(scoring)
+        proj_df   = pd.concat([proj_df, rookie_df], ignore_index=True)
+        proj_df["PROJ_RANK"] = proj_df["PROJ_FV"].rank(ascending=False, method="min").astype(int)
+        proj_df["RANK"]      = proj_df["FANTASY_VALUE"].rank(ascending=False, method="min").astype(int)
+
         proj_eval = FantasyEvaluator(proj_df, scoring)
     except Exception as proj_err:
         st.warning(f"Could not build projections: {proj_err}")
@@ -157,6 +168,35 @@ _rows = (
 _lbl       = lambda r: f"{r[1]} ({r[2]})"
 name_to_id = {_lbl(r): int(r[0]) for r in _rows}
 all_names  = list(name_to_id.keys())
+
+# ─── Player list builder (used by league sync to enrich rosters) ──────────────
+def _build_player_list(player_names: list, pos_map: dict) -> list:
+    """
+    Match raw player names → {name, player_id, position, fv_g}.
+    Uses name_to_id and active_eval from the enclosing module scope.
+    """
+    norm_idx = {norm_player_name(label): pid for label, pid in name_to_id.items()}
+    result = []
+    for pname in player_names:
+        key = norm_player_name(pname)
+        pid = norm_idx.get(key)
+        if pid is None:
+            parts = key.split()
+            if len(parts) >= 2:
+                short = f"{parts[0]} {parts[-1]}"
+                pid = next((p for k, p in norm_idx.items() if short in k), None)
+        if pid is None:
+            continue
+        row = active_eval.get_player_stats(pid)
+        fv_g = round(row["FANTASY_VALUE"], 1) if row is not None else 0.0
+        result.append({
+            "name":      pname,
+            "player_id": pid,
+            "position":  pos_map.get(key, ""),
+            "fv_g":      fv_g,
+        })
+    result.sort(key=lambda p: p["fv_g"], reverse=True)
+    return result
 
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
 st.title("🏀 Fantasy Basketball Analyzer")
@@ -789,12 +829,14 @@ with tab5:
                     chosen_id   = league_options[chosen_name]
 
                     if st.button("Load League", key="sl_load"):
-                        with st.spinner("Fetching all teams and standings..."):
-                            _raw = get_sleeper_league_teams(chosen_id)
+                        with st.spinner("Fetching all teams, standings, and positions..."):
+                            _raw    = get_sleeper_league_teams(chosen_id)
+                            _posmap = sleeper_player_positions()
                         _built = []
                         for _t in _raw:
-                            _t_ids, _ = match_names(_t["player_names"], name_to_id)
-                            _built.append({**_t, "player_ids": _t_ids})
+                            _players = _build_player_list(_t["player_names"], _posmap)
+                            _t_ids   = [p["player_id"] for p in _players]
+                            _built.append({**_t, "player_ids": _t_ids, "players": _players})
                         st.session_state["league_teams"] = _built
                         _mine = next((t for t in _built if t["owner_id"] == user_id), None)
                         if _mine:
@@ -827,12 +869,14 @@ with tab5:
         if espn_id > 0 and st.button("Load League", key="espn_load_league"):
             try:
                 with st.spinner("Connecting to ESPN..."):
-                    _raw = get_espn_league_teams(int(espn_id), int(espn_year),
-                                                 espn_s2, espn_swid)
+                    _raw    = get_espn_league_teams(int(espn_id), int(espn_year),
+                                                    espn_s2, espn_swid)
+                    _posmap = sleeper_player_positions()
                 _built = []
                 for _t in _raw:
-                    _t_ids, _ = match_names(_t["player_names"], name_to_id)
-                    _built.append({**_t, "player_ids": _t_ids})
+                    _players = _build_player_list(_t["player_names"], _posmap)
+                    _t_ids   = [p["player_id"] for p in _players]
+                    _built.append({**_t, "player_ids": _t_ids, "players": _players})
                 st.session_state["league_teams"] = _built
             except ImportError:
                 st.error("espn-api is not installed. Run: `pip install espn-api`")
@@ -853,28 +897,39 @@ with tab5:
                 st.session_state.give_ids        = _mine["player_ids"]
                 st.session_state.recv_ids        = _mine["player_ids"]
 
-    # ── Roster preview & push to trade ────────────────────────────────────────
-    if st.session_state.synced_team_ids:
-        matched_ids = st.session_state.synced_team_ids
-        raw         = st.session_state.get("synced_names", [])
-        _, unmatched = match_names(raw, name_to_id)
+    # ── Ranked team cards ──────────────────────────────────────────────────────
+    if st.session_state["league_teams"]:
+        _lt     = st.session_state["league_teams"]
+        _my_ids = set(st.session_state.synced_team_ids)
+        _medals = {1: "🥇", 2: "🥈", 3: "🥉"}
 
         st.divider()
-        st.markdown(f"**My Roster — {len(matched_ids)} players matched**")
-        if unmatched:
-            st.warning(f"Could not match: {', '.join(unmatched)}")
+        st.caption("Roster auto-loaded into **Start / Sit** and both sides of the **Trade Evaluator**.")
 
-        matched_rows = [
-            active_eval.get_player_stats(pid)
-            for pid in matched_ids
-            if active_eval.get_player_stats(pid) is not None
-        ]
-        if matched_rows:
-            preview = pd.DataFrame([
-                {"Player": r["PLAYER_NAME"], "Team": r["TEAM_ABBREVIATION"],
-                 "FV/G": round(r["FANTASY_VALUE"], 1)}
-                for r in matched_rows
-            ])
-            st.dataframe(preview, hide_index=True, use_container_width=True)
+        for team in _lt:
+            _rank   = team["rank"]
+            _medal  = _medals.get(_rank, f"#{_rank}")
+            _my_tag = "  🏠 My Team" if set(team["player_ids"]) == _my_ids and _my_ids else ""
+            _header = (
+                f"{_medal} **{team['name']}** ({team['owner']})  —  "
+                f"{team['wins']}-{team['losses']}  |  {team['points']:.1f} PF{_my_tag}"
+            )
 
-        st.info("Roster loaded into **Start / Sit** and both sides of the **Trade Evaluator**.")
+            with st.expander(_header):
+                _by_pos = {"Guards": [], "Forwards": [], "Centers": [], "Other": []}
+                for p in team.get("players", []):
+                    _by_pos[pos_group(p["position"])].append(p)
+
+                for _grp in ("Guards", "Forwards", "Centers", "Other"):
+                    _grp_players = _by_pos[_grp]
+                    if not _grp_players:
+                        continue
+                    st.caption(f"**{_grp}**")
+                    _grp_df = pd.DataFrame([
+                        {"Player": p["name"], "FV/G": p["fv_g"]}
+                        for p in _grp_players
+                    ])
+                    st.dataframe(
+                        _grp_df, hide_index=True, use_container_width=True,
+                        height=36 + 35 * len(_grp_df),
+                    )

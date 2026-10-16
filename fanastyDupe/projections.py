@@ -2,6 +2,9 @@ import pandas as pd
 
 PROJ_STATS = ["PTS", "REB", "AST", "STL", "BLK", "FG3M", "TOV"]
 
+INJURY_RETURN_FACTOR = 0.82  # conservative discount for players returning from a missed season
+MIN_PREV_GP_FOR_RETURN = 20   # must have played meaningfully in their last active season
+
 # (max_age_inclusive, multiplier applied to next season)
 _AGE_CURVE = [
     (21, 1.07),
@@ -137,4 +140,79 @@ class ProjectionEngine:
         df["FANTASY_VALUE"] = df["PROJ_FV"]
         df["RANK"]          = df["PROJ_RANK"]
 
+        # ── Inject injury returnees ───────────────────────────────────────
+        returnees = self._build_returnees()
+        if not returnees.empty:
+            df = pd.concat([df, returnees], ignore_index=True)
+            df["PROJ_RANK"] = df["PROJ_FV"].rank(ascending=False, method="min").astype(int)
+            df["RANK"]      = df["FANTASY_VALUE"].rank(ascending=False, method="min").astype(int)
+
         return df
+
+    def _build_returnees(self) -> pd.DataFrame:
+        """
+        Players present in prev_df but absent from base_df — they missed an entire
+        season (injury, suspension, etc.).  Project using their last active stats
+        discounted by INJURY_RETURN_FACTOR and the age curve.
+        """
+        if self.prev is None:
+            return pd.DataFrame()
+
+        base_ids = set(self.base["PLAYER_ID"].values)
+        missed = self.prev[
+            (~self.prev["PLAYER_ID"].isin(base_ids)) &
+            (self.prev["GP"] >= MIN_PREV_GP_FOR_RETURN)
+        ].copy()
+
+        if missed.empty:
+            return pd.DataFrame()
+
+        # Age in projection year = last active age + 2 (one missed season + one projected)
+        missed["AGE"] = missed["AGE"].fillna(28) + 2
+        age_factors   = missed["AGE"].map(_age_factor) * INJURY_RETURN_FACTOR
+
+        # Build PROJ_* columns before overwriting originals (BASE_FV needs originals)
+        for col in PROJ_STATS:
+            if col not in missed.columns:
+                missed[f"PROJ_{col}"] = 0.0
+            elif col == "TOV":
+                missed[f"PROJ_{col}"] = (missed[col] * INJURY_RETURN_FACTOR).round(1).clip(lower=0)
+            else:
+                missed[f"PROJ_{col}"] = (missed[col] * age_factors).round(1).clip(lower=0)
+
+        for col in ["FG_PCT", "FT_PCT", "MIN"]:
+            missed[f"PROJ_{col}"] = _col(missed, col).round(3 if "PCT" in col else 1)
+
+        s = self.scoring
+        missed["BASE_FV"] = (
+            _col(missed, "PTS")  * s.get("pts",  1.0)
+            + _col(missed, "REB")  * s.get("reb",  1.2)
+            + _col(missed, "AST")  * s.get("ast",  1.5)
+            + _col(missed, "STL")  * s.get("stl",  3.0)
+            + _col(missed, "BLK")  * s.get("blk",  3.0)
+            + _col(missed, "FG3M") * s.get("fg3m", 1.0)
+            + _col(missed, "TOV")  * s.get("tov", -1.0)
+        ).round(2)
+
+        missed["PROJ_FV"] = (
+            _col(missed, "PROJ_PTS")  * s.get("pts",  1.0)
+            + _col(missed, "PROJ_REB")  * s.get("reb",  1.2)
+            + _col(missed, "PROJ_AST")  * s.get("ast",  1.5)
+            + _col(missed, "PROJ_STL")  * s.get("stl",  3.0)
+            + _col(missed, "PROJ_BLK")  * s.get("blk",  3.0)
+            + _col(missed, "PROJ_FG3M") * s.get("fg3m", 1.0)
+            + _col(missed, "PROJ_TOV")  * s.get("tov", -1.0)
+        ).round(2)
+
+        missed["FV_DELTA"]  = (missed["PROJ_FV"] - missed["BASE_FV"]).round(2)
+        missed["CONFIDENCE"] = "LOW"
+
+        # Override stat columns with projected values (consistent with main build)
+        for col in PROJ_STATS:
+            missed[col] = missed[f"PROJ_{col}"]
+
+        missed["FANTASY_VALUE"] = missed["PROJ_FV"]
+        missed["PROJ_RANK"]     = 999  # re-ranked after concat in build()
+        missed["RANK"]          = 999
+
+        return missed
