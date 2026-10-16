@@ -5,6 +5,13 @@ import pandas as pd
 
 from data_fetcher import get_player_game_logs, get_season_stats
 from evaluator import FantasyEvaluator, TRADE_STAT_COLS
+from league_sync import (
+    get_espn_league_teams,
+    get_sleeper_league_teams,
+    get_sleeper_leagues,
+    get_sleeper_user,
+    match_names,
+)
 from projections import ProjectionEngine
 from web_projections import (
     build_comparison,
@@ -135,9 +142,11 @@ active_eval = proj_eval if use_projections else evaluator
 mode_label  = PROJ_LABEL if use_projections else ACTUAL_LABEL
 
 # ─── Session State ────────────────────────────────────────────────────────────
-for _k in ("give_ids", "recv_ids", "roster_ids"):
+for _k in ("give_ids", "recv_ids", "roster_ids", "synced_team_ids"):
     if _k not in st.session_state:
         st.session_state[_k] = []
+if "league_teams" not in st.session_state:
+    st.session_state["league_teams"] = []
 
 # ─── Player Selector (always from projection pool — full season) ──────────────
 _rows = (
@@ -153,11 +162,12 @@ all_names  = list(name_to_id.keys())
 st.title("🏀 Fantasy Basketball Analyzer")
 st.caption(f"Active mode: **{mode_label}**")
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📊 Player Explorer",
     "⚖️ Trade Evaluator",
     "🎯 Start / Sit",
     "📈 Projections",
+    "🔗 My League",
 ])
 
 
@@ -279,16 +289,44 @@ with tab2:
     st.subheader("Trade Evaluator")
     st.caption(f"Using: **{mode_label}**  ·  Toggle the mode in the sidebar.")
 
-    if st.button("🗑️ Clear Trade", key="clear_trade"):
-        st.session_state.give_ids = []
-        st.session_state.recv_ids = []
-        st.rerun()
+    _t2_left, _t2_right = st.columns([3, 1])
+    with _t2_right:
+        if st.button("🗑️ Clear Trade", key="clear_trade"):
+            st.session_state.give_ids = []
+            st.session_state.recv_ids = []
+            st.rerun()
+
+    # ── League standings (shown when a league is synced) ──────────────────────
+    _league_teams = st.session_state["league_teams"]
+
+    if _league_teams:
+        with st.expander("📊 League Standings", expanded=False):
+            _standings_df = pd.DataFrame([
+                {"#": t["rank"], "Team": t["name"], "Owner": t["owner"],
+                 "W": t["wins"], "L": t["losses"], "PF": t["points"]}
+                for t in _league_teams
+            ])
+            st.dataframe(_standings_df, hide_index=True, use_container_width=True)
+    else:
+        with _t2_left:
+            st.caption("Sync your league in **My League** to filter players by fantasy team.")
 
     col_give, col_arrow, col_recv = st.columns([5, 1, 5])
 
     def _render_side(header: str, id_key: str, sel_key: str, btn_key: str, rm_prefix: str):
         st.markdown(f"### {header}")
-        sel = st.selectbox("Search player", all_names, key=sel_key)
+
+        # Per-side fantasy team filter
+        _names = all_names
+        if _league_teams:
+            _ft_opts = ["All Players"] + [t["name"] for t in _league_teams]
+            _ft_sel  = st.selectbox("Filter by team", _ft_opts, key=f"ft_{id_key}")
+            if _ft_sel != "All Players":
+                _ft = next((t for t in _league_teams if t["name"] == _ft_sel), None)
+                _ft_ids = set(_ft["player_ids"]) if _ft else set()
+                _names = [n for n, pid in name_to_id.items() if pid in _ft_ids] or all_names
+
+        sel = st.selectbox("Search player", _names, key=sel_key)
         if st.button("＋ Add", key=btn_key):
             pid = name_to_id[sel]
             if pid not in st.session_state[id_key]:
@@ -313,14 +351,14 @@ with tab2:
         return total
 
     with col_give:
-        _render_side("You Give Away", "give_ids", "give_sel", "give_add", "rm_give")
+        _render_side("Give", "give_ids", "give_sel", "give_add", "rm_give")
     with col_arrow:
         st.markdown(
             "<div style='text-align:center;padding-top:160px;font-size:2rem'>⇄</div>",
             unsafe_allow_html=True,
         )
     with col_recv:
-        _render_side("You Receive", "recv_ids", "recv_sel", "recv_add", "rm_recv")
+        _render_side("Receive", "recv_ids", "recv_sel", "recv_add", "rm_recv")
 
     # ── Grade & Analysis ───────────────────────────────────────────────────────
     if st.session_state.give_ids and st.session_state.recv_ids:
@@ -714,3 +752,134 @@ with tab4:
                         f"<span class='{cls}'>{conf}</span>",
                         unsafe_allow_html=True,
                     )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 5 — MY LEAGUE
+# ══════════════════════════════════════════════════════════════════════════════
+with tab5:
+    st.subheader("My League Sync")
+    st.caption("Import your roster directly from Sleeper or ESPN into the Start/Sit or Trade tools.")
+
+    platform = st.radio("Platform", ["Sleeper", "ESPN"], horizontal=True)
+    st.divider()
+
+    synced_names: list = []
+
+    # ── Sleeper ────────────────────────────────────────────────────────────────
+    if platform == "Sleeper":
+        sl_user = st.text_input("Sleeper Username", placeholder="e.g. hoopsguru42")
+        sl_season = st.selectbox("Season", ["2026", "2025", "2024"], index=0)
+
+        if sl_user:
+            try:
+                with st.spinner("Looking up Sleeper user..."):
+                    user_data = get_sleeper_user(sl_user)
+                user_id = user_data["user_id"]
+                st.success(f"Found user: **{user_data.get('display_name', sl_user)}**")
+
+                with st.spinner("Fetching your leagues..."):
+                    leagues = get_sleeper_leagues(user_id, sl_season)
+
+                if not leagues:
+                    st.warning(f"No NBA leagues found for {sl_user} in {sl_season}.")
+                else:
+                    league_options = {lg["name"]: lg["league_id"] for lg in leagues}
+                    chosen_name = st.selectbox("League", list(league_options.keys()))
+                    chosen_id   = league_options[chosen_name]
+
+                    if st.button("Load League", key="sl_load"):
+                        with st.spinner("Fetching all teams and standings..."):
+                            _raw = get_sleeper_league_teams(chosen_id)
+                        _built = []
+                        for _t in _raw:
+                            _t_ids, _ = match_names(_t["player_names"], name_to_id)
+                            _built.append({**_t, "player_ids": _t_ids})
+                        st.session_state["league_teams"] = _built
+                        _mine = next((t for t in _built if t["owner_id"] == user_id), None)
+                        if _mine:
+                            st.session_state["synced_names"]  = _mine["player_names"]
+                            st.session_state.roster_ids       = _mine["player_ids"]
+                            st.session_state.synced_team_ids  = _mine["player_ids"]
+                        else:
+                            st.warning("Could not auto-detect your team — pick it below.")
+
+            except Exception as e:
+                st.error(f"Sleeper error: {e}")
+
+    # ── ESPN ───────────────────────────────────────────────────────────────────
+    else:
+        espn_id   = st.number_input("League ID", min_value=1, step=1, value=0)
+        espn_year = st.number_input("Season Year (ending year)", min_value=2020, max_value=2030,
+                                    value=2027, step=1,
+                                    help="Use the ending year: 2027 for the 2026-27 season.")
+
+        with st.expander("Private league? Add your ESPN cookies"):
+            st.caption(
+                "Log in to ESPN Fantasy, open DevTools → Application → Cookies, "
+                "and copy `espn_s2` and `SWID`."
+            )
+            espn_s2  = st.text_input("espn_s2", type="password")
+            espn_swid = st.text_input("SWID", type="password")
+
+        if espn_id > 0 and st.button("Load League", key="espn_load_league"):
+            try:
+                with st.spinner("Connecting to ESPN..."):
+                    _raw = get_espn_league_teams(int(espn_id), int(espn_year),
+                                                 espn_s2, espn_swid)
+                _built = []
+                for _t in _raw:
+                    _t_ids, _ = match_names(_t["player_names"], name_to_id)
+                    _built.append({**_t, "player_ids": _t_ids})
+                st.session_state["league_teams"] = _built
+            except ImportError:
+                st.error("espn-api is not installed. Run: `pip install espn-api`")
+            except Exception as e:
+                st.error(f"ESPN error: {e}")
+
+        if st.session_state["league_teams"] and platform == "ESPN":
+            _lt = st.session_state["league_teams"]
+            _labels = [f"{t['name']} ({t['owner']})" for t in _lt]
+            _my_idx = st.selectbox("Which team is yours?", range(len(_labels)),
+                                   format_func=lambda i: _labels[i],
+                                   key="espn_my_team_idx")
+            if st.button("Set as My Team", key="espn_set_my_team"):
+                _mine = _lt[_my_idx]
+                st.session_state["synced_names"] = _mine["player_names"]
+                st.session_state.roster_ids      = _mine["player_ids"]
+                st.session_state.synced_team_ids = _mine["player_ids"]
+
+    # ── Roster preview & push to trade ────────────────────────────────────────
+    if st.session_state.synced_team_ids:
+        matched_ids = st.session_state.synced_team_ids
+        raw         = st.session_state.get("synced_names", [])
+        _, unmatched = match_names(raw, name_to_id)
+
+        st.divider()
+        st.markdown(f"**My Roster — {len(matched_ids)} players matched**")
+        if unmatched:
+            st.warning(f"Could not match: {', '.join(unmatched)}")
+
+        matched_rows = [
+            active_eval.get_player_stats(pid)
+            for pid in matched_ids
+            if active_eval.get_player_stats(pid) is not None
+        ]
+        if matched_rows:
+            preview = pd.DataFrame([
+                {"Player": r["PLAYER_NAME"], "Team": r["TEAM_ABBREVIATION"],
+                 "FV/G": round(r["FANTASY_VALUE"], 1)}
+                for r in matched_rows
+            ])
+            st.dataframe(preview, hide_index=True, use_container_width=True)
+
+        st.info("Roster auto-loaded into **Start / Sit**. Use buttons below to load into Trade Evaluator.")
+        bc1, bc2 = st.columns(2)
+
+        if bc1.button("⚖️ Give", key="push_give"):
+            st.session_state.give_ids = matched_ids
+            st.success("Loaded into Give side of Trade Evaluator.")
+
+        if bc2.button("⚖️ Receive", key="push_recv"):
+            st.session_state.recv_ids = matched_ids
+            st.success("Loaded into Receive side of Trade Evaluator.")
