@@ -68,7 +68,7 @@ instance/
 
 # Scrapy stuff:
 .scrapy
-
+.claude/
 # Sphinx documentation
 docs/_build/
 
@@ -132,7 +132,9 @@ __pypackages__/
 # Celery stuff
 celerybeat-schedule*
 celerybeat.pid
-
+cleaned/
+dataset/
+.jpg
 # Redis
 *.rdb
 *.aof
