@@ -801,6 +801,8 @@ with tab5:
                             st.session_state["synced_names"]  = _mine["player_names"]
                             st.session_state.roster_ids       = _mine["player_ids"]
                             st.session_state.synced_team_ids  = _mine["player_ids"]
+                            st.session_state.give_ids         = _mine["player_ids"]
+                            st.session_state.recv_ids         = _mine["player_ids"]
                         else:
                             st.warning("Could not auto-detect your team — pick it below.")
 
@@ -848,6 +850,8 @@ with tab5:
                 st.session_state["synced_names"] = _mine["player_names"]
                 st.session_state.roster_ids      = _mine["player_ids"]
                 st.session_state.synced_team_ids = _mine["player_ids"]
+                st.session_state.give_ids        = _mine["player_ids"]
+                st.session_state.recv_ids        = _mine["player_ids"]
 
     # ── Roster preview & push to trade ────────────────────────────────────────
     if st.session_state.synced_team_ids:
@@ -873,13 +877,4 @@ with tab5:
             ])
             st.dataframe(preview, hide_index=True, use_container_width=True)
 
-        st.info("Roster auto-loaded into **Start / Sit**. Use buttons below to load into Trade Evaluator.")
-        bc1, bc2 = st.columns(2)
-
-        if bc1.button("⚖️ Give", key="push_give"):
-            st.session_state.give_ids = matched_ids
-            st.success("Loaded into Give side of Trade Evaluator.")
-
-        if bc2.button("⚖️ Receive", key="push_recv"):
-            st.session_state.recv_ids = matched_ids
-            st.success("Loaded into Receive side of Trade Evaluator.")
+        st.info("Roster loaded into **Start / Sit** and both sides of the **Trade Evaluator**.")
