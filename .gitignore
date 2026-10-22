@@ -70,6 +70,8 @@ instance/
 .scrapy
 dataset/
 cleaned/
+.claude/
+.csv
 # Sphinx documentation
 docs/_build/
 
