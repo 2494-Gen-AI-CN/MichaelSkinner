@@ -1,0 +1,2 @@
+# Keep the large dataset local; it exceeds GitHub's file size limit.
+/college_majors_2026.csv
