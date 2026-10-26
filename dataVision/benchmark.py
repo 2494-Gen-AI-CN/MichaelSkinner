@@ -26,7 +26,7 @@ def get_national_bench(df):
    """
    Return the Dataframe slice that contains our necessary fields
    """
-   
+   df = df[~df['institution_state'].isin(['PR', 'GU', 'VI', 'AS', 'MP'])]
    return df.loc[df['earnings_cohort_size_4yr'] >= 30 ,['cip_title', 'institution_name', 'earnings_vs_national_pct']].dropna().sort_values('earnings_vs_national_pct')
 
 def get_growing_occupation(df):
