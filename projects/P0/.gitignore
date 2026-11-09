@@ -1,0 +1,20 @@
+# Personal planning notes
+/plan.md
+
+# Local datasets and generated intermediates
+/data/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+/config/config.yaml
+/credentials/
+/secrets/
+/application_default_credentials.json
+/kaggle.json
+
+# Python environment and caches
+.venv/
+__pycache__/
+.pytest_cache/
