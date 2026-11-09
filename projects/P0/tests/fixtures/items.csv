@@ -1,0 +1,6 @@
+order_id,order_item_id,product_id,seller_id,shipping_limit_date,price,freight_value
+001,1,p1,s1,2018-01-02 12:00:00,10.10,2.50
+001,1,p1,s1,2018-01-02 12:00:00,10.10,2.50
+002,1,p2,s2,2018-01-02 12:00:00,-5,2
+003,1,p3,s3,not-a-date,20,3
+004,1,p4,s4,2018-01-02 12:00:00,20,-1
