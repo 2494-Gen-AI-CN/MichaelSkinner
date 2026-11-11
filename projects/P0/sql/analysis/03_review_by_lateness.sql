@@ -1,16 +1,20 @@
 -- Q2: How do review scores differ between early, on-time, and late deliveries?
--- Uses order_delivery (one row per known order with items) so each review is counted
--- once regardless of how many items are in the order.
--- Orders without a review or without a known delivery outcome are excluded.
+-- Lower average scores in late groups identify a customer-satisfaction association,
+-- not a causal effect. Join the purchase-date dimension and then deduplicate orders
+-- so multi-item orders do not receive extra weight. Use known delivered, reviewed orders.
+WITH orders AS (
+  SELECT DISTINCT f.order_id, f.lateness_bucket, f.review_score
+  FROM `${PROJECT}.${WAREHOUSE}.fact_order_item` AS f
+  JOIN `${PROJECT}.${WAREHOUSE}.dim_date` AS d ON d.date_key = f.purchase_date_key
+  WHERE f.is_delivered AND f.review_score IS NOT NULL AND d.date IS NOT NULL
+)
 SELECT
   lateness_bucket,
   COUNT(*)                                        AS orders,
   ROUND(AVG(review_score), 3)                     AS avg_review_score,
   COUNTIF(review_score >= 4)                      AS high_score_orders,
   ROUND(SAFE_DIVIDE(COUNTIF(review_score >= 4), COUNT(*)), 4) AS high_score_rate
-FROM `${PROJECT}.${WAREHOUSE}.order_delivery`
-WHERE review_score IS NOT NULL
-  AND lateness_bucket NOT IN ('not_delivered', 'unknown')
+FROM orders
 GROUP BY lateness_bucket
 ORDER BY
   CASE lateness_bucket

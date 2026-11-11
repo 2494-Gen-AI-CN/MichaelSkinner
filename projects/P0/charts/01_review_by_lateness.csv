@@ -1,0 +1,6 @@
+lateness_bucket,orders,avg_review_score,high_score_orders,high_score_rate
+early,88163,4.294,72989,0.8279
+on_time,1280,4.034,943,0.7367
+1-3 days late,1852,3.291,985,0.5319
+4-7 days late,1748,2.103,393,0.2248
+8+ days late,2781,1.696,326,0.1172

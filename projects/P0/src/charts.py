@@ -1,313 +1,245 @@
-"""Query the warehouse and generate analysis charts.
+"""Create five charts from BigQuery results and print the supporting statistics.
 
-Produces four PNG charts and prints a correlation and business-impact summary.
-Charts are saved in data/charts/ (or the path given by --out).
-
-Usage:
+Run from projects/P0 with:
     python -m src.charts --config config/config.yaml
-    python -m src.charts --config config/config.yaml --out data/charts
+
+PNG charts and their plotted CSV data are saved in charts/ by default.
 """
 
 import argparse
+import os
 from pathlib import Path
+
+# Keep Matplotlib's generated cache with the ignored local project data.
+ROOT = Path(__file__).resolve().parents[1]
+os.environ.setdefault("MPLCONFIGDIR", str(ROOT / "data" / ".matplotlib"))
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 from google.cloud import bigquery
 
 from .ingest.config import load_config
+from .build_warehouse import render_sql
+
+
+TEAL = "#009E91"
+BLUE = "#4C7DA7"
+ORANGE = "#F07A40"
+RED = "#D9555B"
 
 
 def _client(settings):
+    """Connect to the configured BigQuery project using the local Google login."""
     cloud = settings["bigquery"]
     return bigquery.Client(project=cloud["project"], location=cloud["location"])
 
 
 def _run(client, cloud, sql):
-    rendered = (sql
-                .replace("${PROJECT}",   cloud["project"])
-                .replace("${WAREHOUSE}", cloud["warehouse_dataset"]))
-    return client.query(rendered).result().to_dataframe()
+    """Run a read-only query and turn its result rows into a pandas table."""
+    sql = render_sql(sql, cloud)
+    result = client.query(sql, location=cloud["location"]).result()
+    # Use normal query results, without requiring the separate Storage Read API.
+    return pd.DataFrame([dict(row) for row in result],
+                        columns=[field.name for field in result.schema])
 
 
-# ── Chart 1 ──────────────────────────────────────────────────────────────────
+def _run_file(client, cloud, filename):
+    """Run an existing analysis SQL file so charts and live queries share the same logic."""
+    sql = (ROOT / "sql" / "analysis" / filename).read_text()
+    return _run(client, cloud, sql)
 
-def chart_review_by_lateness(client, cloud, out_dir):
-    """Average review score by delivery lateness bucket, with order count per bar (Q2)."""
-    df = _run(client, cloud, """
-        SELECT lateness_bucket,
-               COUNT(*) AS orders,
-               ROUND(AVG(review_score), 3) AS avg_score
-        FROM `${PROJECT}.${WAREHOUSE}.order_delivery`
-        WHERE review_score IS NOT NULL
-          AND lateness_bucket NOT IN ('not_delivered', 'unknown')
-        GROUP BY lateness_bucket
-        ORDER BY
-          CASE lateness_bucket
-            WHEN 'early'         THEN 1
-            WHEN 'on_time'       THEN 2
-            WHEN '1-3 days late' THEN 3
-            WHEN '4-7 days late' THEN 4
-            WHEN '8+ days late'  THEN 5
-          END
-    """)
 
-    colors = ["#2ecc71" if b in ("early", "on_time") else "#e74c3c"
-              for b in df["lateness_bucket"]]
-    labels = [f"{b}\n(n={o:,})" for b, o in zip(df["lateness_bucket"], df["orders"])]
-
-    fig, ax = plt.subplots(figsize=(9, 5))
-    bars = ax.bar(labels, df["avg_score"], color=colors, edgecolor="white", width=0.6)
-    for bar, score in zip(bars, df["avg_score"]):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.05,
-                f"{score:.2f}", ha="center", va="bottom", fontsize=9)
-    ax.set_ylim(0, 5.6)
-    ax.set_xlabel("Delivery outcome")
-    ax.set_ylabel("Average review score (1–5)")
-    ax.set_title("Review Score by Delivery Lateness")
+def _save_chart(fig, df, out_dir, filename):
+    """Save a PNG and the exact rows plotted in it for checking and reuse."""
     fig.tight_layout()
-
-    path = out_dir / "01_review_by_lateness.png"
-    fig.savefig(path, dpi=150)
+    fig.savefig(out_dir / filename, dpi=180)
     plt.close(fig)
-    print(f"Saved {path}")
+    df.to_csv(out_dir / Path(filename).with_suffix(".csv"), index=False)
+    print(f"Saved {out_dir / filename}")
+
+
+def chart_late_rate_by_corridor(client, cloud, out_dir):
+    """Show the twelve highest late-rate corridors with at least thirty delivered items."""
+    df = _run_file(client, cloud, "01_late_rate_by_corridor.sql")
+    # Calculate from counts before ranking; rounded rates can create artificial ties.
+    df["late_rate"] = df["late_items"] / df["delivered_items"]
+    df = df.sort_values(["late_rate", "seller_state", "customer_state"],
+                        ascending=[False, True, True]).head(12).reset_index(drop=True)
+    labels = [f"{row.seller_state} → {row.customer_state} (n={row.delivered_items:,})"
+              for row in df.itertuples()]
+    rates = df["late_rate"] * 100
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.barh(labels, rates, color=BLUE)
+    ax.invert_yaxis()
+    ax.set_xlim(0, max(rates) * 1.18)
+    for index, value in enumerate(rates):
+        ax.text(value + 0.3, index, f"{value:.1f}%", va="center")
+    ax.set_xlabel("Late delivered items (%) · minimum 30 items per corridor")
+    ax.set_title("Highest late rates among eligible seller-to-customer corridors")
+    _save_chart(fig, df, out_dir, "05_late_rate_by_corridor.png")
     return df
 
-
-# ── Chart 2 ──────────────────────────────────────────────────────────────────
 
 def chart_late_rate_by_category(client, cloud, out_dir):
-    """Top 15 product categories by late-delivery rate (Q1b)."""
-    df = _run(client, cloud, """
-        SELECT COALESCE(dp.category_en, 'unknown') AS category,
-               COUNT(*) AS delivered_items,
-               ROUND(SAFE_DIVIDE(COUNTIF(f.is_late), COUNT(*)), 4) AS late_rate
-        FROM `${PROJECT}.${WAREHOUSE}.fact_order_item` AS f
-        JOIN `${PROJECT}.${WAREHOUSE}.dim_product` AS dp USING (product_key)
-        WHERE f.is_delivered AND dp.product_key != 'unknown'
-        GROUP BY category
-        HAVING delivered_items >= 50
-        ORDER BY late_rate DESC
-        LIMIT 15
-    """)
-
-    fig, ax = plt.subplots(figsize=(9, 6))
-    ax.barh(df["category"][::-1], df["late_rate"][::-1] * 100,
-            color="#e67e22", edgecolor="white")
-    ax.set_xlabel("Late-delivery rate (%)")
-    ax.set_title("Top 15 Product Categories by Late-Delivery Rate\n(min. 50 delivered items)")
-    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.0f}%"))
-    fig.tight_layout()
-
-    path = out_dir / "02_late_rate_by_category.png"
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
-    print(f"Saved {path}")
+    """Show fifteen high late-rate categories, retaining unknown category labels."""
+    df = _run_file(client, cloud, "02_late_rate_by_category.sql")
+    # The SQL excludes missing product references, but retains known products with no category.
+    df["late_rate"] = df["late_items"] / df["delivered_items"]
+    df = df.sort_values(["late_rate", "category"], ascending=[False, True]).head(15).reset_index(drop=True)
+    labels = df["category"].str.replace("_", " ")
+    fig, ax = plt.subplots(figsize=(10, 7))
+    ax.barh(labels, df["late_rate"] * 100, color=ORANGE)
+    ax.invert_yaxis()
+    ax.set_xlabel("Late delivered items (%) · minimum 50 items per category")
+    ax.set_title("Audio has the highest eligible category late rate")
+    _save_chart(fig, df, out_dir, "02_late_rate_by_category.png")
     return df
 
 
-# ── Chart 3 ──────────────────────────────────────────────────────────────────
-
-def chart_late_rate_by_state(client, cloud, out_dir):
-    """Late-delivery rate by customer state, coloured by severity (Q3 / query B).
-
-    Returns the full within-state penalty dataframe so main() can also print
-    the score gap between on-time and late orders per state.
-    """
-    df = _run(client, cloud, """
-        WITH orders AS (
-          SELECT f.order_id,
-                 ANY_VALUE(f.review_score)   AS score,
-                 ANY_VALUE(f.is_late)        AS is_late,
-                 ANY_VALUE(c.customer_state) AS state
-          FROM `${PROJECT}.${WAREHOUSE}.fact_order_item` AS f
-          JOIN `${PROJECT}.${WAREHOUSE}.dim_customer`    AS c USING (customer_key)
-          WHERE f.review_score IS NOT NULL
-            AND f.is_delivered
-          GROUP BY f.order_id
-        )
-        SELECT
-          state                                                       AS customer_state,
-          COUNT(*)                                                    AS orders,
-          ROUND(AVG(CAST(is_late AS INT64)), 4)                      AS late_rate,
-          ROUND(AVG(IF(NOT is_late, score, NULL)), 3)                AS avg_score_on_time,
-          ROUND(AVG(IF(    is_late, score, NULL)), 3)                AS avg_score_late,
-          ROUND(AVG(IF(NOT is_late, score, NULL))
-              - AVG(IF(    is_late, score, NULL)), 3)                AS score_penalty
-        FROM orders
-        GROUP BY state
-        HAVING COUNT(*) >= 100
-        ORDER BY late_rate DESC
-    """)
-
-    colors = ["#c0392b" if r > 0.10 else "#e67e22" if r > 0.07 else "#3498db"
-              for r in df["late_rate"]]
-
-    fig, ax = plt.subplots(figsize=(9, 8))
-    ax.barh(df["customer_state"][::-1], df["late_rate"][::-1] * 100,
-            color=colors[::-1], edgecolor="white")
-    ax.set_xlabel("Late-delivery rate (%)")
-    ax.set_title("Late-Delivery Rate by Customer State\n"
-                 "(min. 100 delivered orders with reviews; red > 10%, orange 7–10%, blue < 7%)")
-    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.0f}%"))
-    fig.tight_layout()
-
-    path = out_dir / "03_late_rate_by_state.png"
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
-    print(f"Saved {path}")
+def chart_review_by_lateness(client, cloud, out_dir):
+    """Compare review averages using one reviewed delivered order per observation."""
+    df = _run_file(client, cloud, "03_review_by_lateness.sql")
+    labels = [f"{row.lateness_bucket.replace('on_time', 'on time')}\n(n={row.orders:,})"
+              for row in df.itertuples()]
+    colors = [TEAL if bucket in ("early", "on_time") else RED for bucket in df["lateness_bucket"]]
+    fig, ax = plt.subplots(figsize=(10, 5))
+    bars = ax.bar(labels, df["avg_review_score"], color=colors, width=0.65)
+    for bar, value in zip(bars, df["avg_review_score"]):
+        ax.text(bar.get_x() + bar.get_width()/2, value + 0.06, f"{value:.2f}", ha="center")
+    ax.set_ylim(0, 5.4)
+    ax.set_ylabel("Average review score (1–5)")
+    ax.set_title("Lower reviews accompany longer delivery delays")
+    _save_chart(fig, df, out_dir, "01_review_by_lateness.png")
     return df
 
 
-# ── Chart 4 ──────────────────────────────────────────────────────────────────
+def chart_promise_vs_actual_by_state(client, cloud, out_dir):
+    """Compare promised and actual durations for the eight highest-late-rate eligible states."""
+    df = _run_file(client, cloud, "04_promise_realism_by_state.sql")
+    df = df.sort_values(["late_rate", "customer_state"], ascending=[False, True]).reset_index(drop=True)
+    # Include all delivered orders, not only reviewed orders, as required by the promise question.
+    plotted = df.head(8).copy()
+    labels = [f"{row.customer_state} ({row.late_rate:.1%} late)" for row in plotted.itertuples()]
+    positions = np.arange(len(plotted))
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.barh(positions - 0.18, plotted["avg_promise_days"], 0.33, label="Promised", color=BLUE)
+    ax.barh(positions + 0.18, plotted["avg_delivery_days"], 0.33, label="Actual", color=TEAL)
+    ax.set_yticks(positions, labels=labels)
+    ax.invert_yaxis()
+    ax.set_xlabel("Average calendar days from purchase")
+    ax.set_title("Average delivery is earlier than the promise", pad=40)
+    ax.legend(loc="lower left", bbox_to_anchor=(0, 1.01), ncol=2, frameon=False, borderaxespad=0)
+    fig.text(0.5, 0.01, "Eight highest-late-rate states shown; minimum 100 delivered orders, including orders without reviews.",
+             ha="center", fontsize=9)
+    fig.tight_layout(rect=(0, 0.04, 1, 1))
+    # Keep the footer space when saving this figure.
+    fig.savefig(out_dir / "03_promise_vs_actual_by_state.png", dpi=180)
+    plt.close(fig)
+    plotted.to_csv(out_dir / "03_promise_vs_actual_by_state.csv", index=False)
+    print(f"Saved {out_dir / '03_promise_vs_actual_by_state.png'}")
+    return df
+
 
 def chart_freight_vs_satisfaction(client, cloud, out_dir):
-    """Average review score by freight-to-price ratio bucket (Q4)."""
+    """Compare order-level review scores across order freight-to-merchandise ratios."""
     df = _run(client, cloud, """
-        SELECT
-          CASE
-            WHEN order_freight_ratio < 0.1  THEN '< 10%'
-            WHEN order_freight_ratio < 0.2  THEN '10-20%'
-            WHEN order_freight_ratio < 0.4  THEN '20-40%'
-            WHEN order_freight_ratio < 0.7  THEN '40-70%'
-            ELSE                                 '>= 70%'
-          END AS freight_bucket,
-          COUNT(*) AS orders,
-          ROUND(AVG(CAST(review_score AS FLOAT64)), 3) AS avg_review_score
+        SELECT CASE
+                 WHEN order_freight_ratio < 0.1 THEN '< 10%'
+                 WHEN order_freight_ratio < 0.2 THEN '10-20%'
+                 WHEN order_freight_ratio < 0.4 THEN '20-40%'
+                 WHEN order_freight_ratio < 0.7 THEN '40-70%'
+                 ELSE '>= 70%'
+               END AS freight_bucket,
+               COUNT(*) AS orders,
+               ROUND(AVG(CAST(review_score AS FLOAT64)), 3) AS avg_review_score
         FROM `${PROJECT}.${WAREHOUSE}.order_delivery`
-        WHERE review_score        IS NOT NULL
-          AND order_freight_ratio IS NOT NULL
-          AND is_delivered
+        WHERE review_score IS NOT NULL AND order_freight_ratio IS NOT NULL AND is_delivered
         GROUP BY freight_bucket
         ORDER BY MIN(order_freight_ratio)
     """)
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    bars = ax.bar(df["freight_bucket"], df["avg_review_score"],
-                  color="#9b59b6", edgecolor="white", width=0.6)
-    for bar, score in zip(bars, df["avg_review_score"]):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.05,
-                f"{score:.2f}", ha="center", va="bottom", fontsize=9)
-    ax.set_ylim(0, 5.6)
-    ax.set_xlabel("Freight charge as share of item price")
+    labels = [f"{row.freight_bucket}\n(n={row.orders:,})" for row in df.itertuples()]
+    fig, ax = plt.subplots(figsize=(10, 5))
+    bars = ax.bar(labels, df["avg_review_score"], color="#8265AF", width=0.65)
+    for bar, value in zip(bars, df["avg_review_score"]):
+        ax.text(bar.get_x() + bar.get_width()/2, value + 0.06, f"{value:.2f}", ha="center")
+    ax.set_ylim(0, 5.4)
+    ax.set_xlabel("Order freight charge / order merchandise value")
     ax.set_ylabel("Average review score (1–5)")
-    ax.set_title("Review Score by Freight-to-Price Ratio")
-    fig.tight_layout()
-
-    path = out_dir / "04_freight_vs_satisfaction.png"
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
-    print(f"Saved {path}")
+    ax.set_title("Review differences across freight shares are small")
+    _save_chart(fig, df, out_dir, "04_freight_vs_satisfaction.png")
     return df
 
 
-# ── Analytics ─────────────────────────────────────────────────────────────────
-
-def compute_bad_review_share(client, cloud):
-    """Share of orders that are late vs share of 1–2 star reviews from late orders (query A)."""
-    return _run(client, cloud, """
-        WITH orders AS (
-          SELECT order_id,
-                 ANY_VALUE(review_score) AS score,
-                 ANY_VALUE(is_late)      AS is_late
-          FROM `${PROJECT}.${WAREHOUSE}.fact_order_item`
-          WHERE review_score IS NOT NULL AND is_delivered
-          GROUP BY order_id
-        )
-        SELECT
-          COUNT(*)                                                        AS reviewed_orders,
-          ROUND(AVG(CAST(is_late AS INT64)), 4)                          AS late_share_of_orders,
-          ROUND(SAFE_DIVIDE(COUNTIF(is_late AND score <= 2),
-                            COUNTIF(score <= 2)), 4)                     AS late_share_of_bad_reviews,
-          COUNTIF(score <= 2)                                            AS total_bad_reviews,
-          COUNTIF(is_late AND score <= 2)                                AS bad_reviews_from_late
-        FROM orders
-    """).iloc[0]
-
-
 def compute_correlation(client, cloud):
-    """Pearson and Spearman r between days_late and review_score at order level.
-
-    Both are computed in BigQuery. Spearman is Pearson applied to the per-row
-    ranks, which BigQuery's RANK() window function provides directly.
-    A negative r means later deliveries tend to receive lower reviews.
-    This is association only: product quality, seller communication, and other
-    unmeasured factors also drive review scores independently of arrival date.
-    """
-    pearson = _run(client, cloud, """
-        SELECT
-          ROUND(CORR(CAST(days_late    AS FLOAT64),
-                     CAST(review_score AS FLOAT64)), 4) AS pearson_r,
-          COUNT(*) AS n
-        FROM `${PROJECT}.${WAREHOUSE}.order_delivery`
-        WHERE days_late IS NOT NULL AND review_score IS NOT NULL AND is_delivered
-    """).iloc[0]
-
-    spearman = _run(client, cloud, """
-        SELECT ROUND(CORR(rank_days_late, rank_score), 4) AS spearman_r, COUNT(*) AS n
-        FROM (
-          SELECT RANK() OVER (ORDER BY days_late)    AS rank_days_late,
-                 RANK() OVER (ORDER BY review_score) AS rank_score
+    """Calculate order-level correlations, using average tied ranks for Spearman."""
+    # RANK gives a tie group's first position. Adding (group_size - 1) / 2
+    # assigns the average position, which is the standard tie handling for Spearman.
+    result = _run(client, cloud, """
+        WITH ranked AS (
+          SELECT days_late, review_score,
+                 RANK() OVER (ORDER BY days_late)
+                   + (COUNT(*) OVER (PARTITION BY days_late) - 1) / 2.0 AS rank_days,
+                 RANK() OVER (ORDER BY review_score)
+                   + (COUNT(*) OVER (PARTITION BY review_score) - 1) / 2.0 AS rank_score
           FROM `${PROJECT}.${WAREHOUSE}.order_delivery`
           WHERE days_late IS NOT NULL AND review_score IS NOT NULL AND is_delivered
         )
+        SELECT ROUND(CORR(CAST(days_late AS FLOAT64), CAST(review_score AS FLOAT64)), 4) AS pearson_r,
+               ROUND(CORR(rank_days, rank_score), 4) AS spearman_r,
+               COUNT(*) AS n
+        FROM ranked
     """).iloc[0]
+    return float(result["pearson_r"]), float(result["spearman_r"]), int(result["n"])
 
-    return (float(pearson["pearson_r"]),
-            float(spearman["spearman_r"]),
-            int(pearson["n"]))
-
-
-# ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
+    """Generate the five presentation charts and print their supporting statistics."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default="config/config.yaml")
-    parser.add_argument("--out",    type=Path, default=None,
-                        help="Output directory for charts (default: data/charts)")
+    parser.add_argument("--out", type=Path, help="Chart directory (default: charts)")
+    parser.add_argument("--render-only", action="store_true", help="Save analysis SQL with project placeholders filled in, without querying BigQuery.")
     args = parser.parse_args()
-
     settings = load_config(args.config)
-    cloud    = settings["bigquery"]
-    out_dir  = args.out or (settings["root"] / "data" / "charts")
+    cloud = settings["bigquery"]
+    if args.render_only:
+        output = settings["root"] / "data/rendered_analysis"
+        output.mkdir(parents=True, exist_ok=True)
+        for path in sorted((settings["root"] / "sql/analysis").glob("*.sql")):
+            (output / path.name).write_text(render_sql(path.read_text(), cloud))
+        print(f"Analysis SQL saved in {output}. No BigQuery requests were made.")
+        return 0
+    out_dir = args.out or settings["root"] / "charts"
     out_dir.mkdir(parents=True, exist_ok=True)
-
     client = _client(settings)
 
-    chart_review_by_lateness(client, cloud, out_dir)
+    # Each exported CSV contains exactly the rows shown in its corresponding PNG.
+    chart_late_rate_by_corridor(client, cloud, out_dir)
     chart_late_rate_by_category(client, cloud, out_dir)
-    state_df = chart_late_rate_by_state(client, cloud, out_dir)
+    chart_review_by_lateness(client, cloud, out_dir)
+    promises = chart_promise_vs_actual_by_state(client, cloud, out_dir)
     chart_freight_vs_satisfaction(client, cloud, out_dir)
+    early_states = (promises["avg_delivery_days"] < promises["avg_promise_days"]).sum()
+    print(f"Average delivery is earlier than promised in {early_states} of {len(promises)} eligible states.")
 
-    # ── Business impact ───────────────────────────────────────────────────────
-    brs = compute_bad_review_share(client, cloud)
-    print(f"\nBusiness impact (query A)")
-    print(f"  Reviewed orders : {int(brs['reviewed_orders']):,}")
-    print(f"  Late share      : {float(brs['late_share_of_orders']):.1%} of reviewed orders are late")
-    print(f"  Bad-review share: {float(brs['late_share_of_bad_reviews']):.1%} of 1–2 star reviews come from late orders")
-    print(f"  ({int(brs['bad_reviews_from_late']):,} of {int(brs['total_bad_reviews']):,} bad reviews)")
+    # Review comparisons deliberately use a different population: reviewed delivered orders.
+    impact = _run_file(client, cloud, "07_late_share_of_bad_reviews.sql").iloc[0]
+    print(f"Reviewed delivered orders: {int(impact['reviewed_orders']):,}")
+    print(f"Late share: {float(impact['late_share_of_orders']):.1%}")
+    print(f"Share of 1–2 star reviews from late orders: {float(impact['late_share_of_bad_reviews']):.1%}")
+    states = _run_file(client, cloud, "08_within_state_penalty.sql")
+    lower_scores = (states["score_penalty"] > 0).sum()
+    print(f"Late orders score lower in {lower_scores} of {len(states)} states with at least 100 reviewed delivered orders.")
 
-    # ── Within-state penalty ──────────────────────────────────────────────────
-    print(f"\nWithin-state score penalty (query B) — late orders vs on-time within same state")
-    print(f"  {'State':<6}  {'Late rate':>9}  {'On-time':>7}  {'Late':>5}  {'Penalty':>7}")
-    for _, row in state_df.head(10).iterrows():
-        print(f"  {row['customer_state']:<6}  {float(row['late_rate']):>8.1%}  "
-              f"{float(row['avg_score_on_time']):>7.2f}  "
-              f"{float(row['avg_score_late']):>5.2f}  "
-              f"{float(row['score_penalty']):>7.2f}")
-    states_with_penalty = (state_df["score_penalty"] > 0).sum()
-    print(f"  Late orders score lower than on-time orders in {states_with_penalty} of {len(state_df)} states.")
-
-    # ── Correlation ───────────────────────────────────────────────────────────
-    pearson_r, spearman_r, n = compute_correlation(client, cloud)
-    print(f"\nCorrelation — days_late vs review_score  (n = {n:,} delivered orders with reviews)")
-    print(f"  Pearson r  = {pearson_r:+.4f}")
-    print(f"  Spearman r = {spearman_r:+.4f}")
-    print("  Interpretation: late deliveries are associated with lower scores in every state,")
-    print("  so geography alone does not explain the gap. The association is not causal —")
-    print("  late orders may also have product or seller issues that independently drive scores.")
+    pearson, spearman, count = compute_correlation(client, cloud)
+    print(f"Days late vs review score (n={count:,}; early deliveries retain negative days):")
+    print(f"  Pearson r = {pearson:+.4f}")
+    print(f"  Spearman rho = {spearman:+.4f} (average tied ranks)")
+    freight = _run_file(client, cloud, "05_freight_vs_satisfaction.sql").iloc[0]
+    print(f"Freight ratio vs review score: Pearson r = {float(freight['pearson_r']):+.4f}")
+    print("These are descriptive associations; state comparisons do not control for all other factors.")
     return 0
 
 

@@ -1,16 +1,15 @@
--- How big is the lateness problem? Late orders are a minority of all orders but
--- they produce a disproportionate share of 1–2 star reviews.
--- This single comparison makes the business case: fixing late deliveries removes
--- a share of bad reviews that is much larger than the late-order share itself.
--- Uses fact_order_item grouped by order_id so each review is counted once.
+-- Q6: What share of reviewed orders are late, and what share of low reviews do they account for?
+-- A disproportionate share helps prioritise investigation; it does not prove that
+-- eliminating lateness would eliminate those low reviews. Join purchase dates and
+-- group by order_id so each reviewed delivered order is counted once.
 WITH orders AS (
-  SELECT order_id,
-         ANY_VALUE(review_score) AS score,
-         ANY_VALUE(is_late)      AS is_late
-  FROM `${PROJECT}.${WAREHOUSE}.fact_order_item`
-  WHERE review_score IS NOT NULL
-    AND is_delivered
-  GROUP BY order_id
+  SELECT f.order_id,
+         ANY_VALUE(f.review_score) AS score,
+         ANY_VALUE(f.is_late)      AS is_late
+  FROM `${PROJECT}.${WAREHOUSE}.fact_order_item` AS f
+  JOIN `${PROJECT}.${WAREHOUSE}.dim_date` AS d ON d.date_key = f.purchase_date_key
+  WHERE f.review_score IS NOT NULL AND f.is_delivered AND d.date IS NOT NULL
+  GROUP BY f.order_id
 )
 SELECT
   COUNT(*)                                                              AS reviewed_orders,

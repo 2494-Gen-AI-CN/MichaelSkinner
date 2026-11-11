@@ -1,6 +1,6 @@
--- Does lateness hurt reviews within every state, or only in distant regions?
--- If late orders score lower than on-time orders inside each state, geography
--- and distance cannot be the main explanation for the review gap.
+-- Q7: Do late orders receive lower reviews within the same customer state?
+-- Within-state gaps show whether the association also appears inside regions.
+-- They do not control for within-state distance, product mix, or seller differences.
 -- Uses fact_order_item grouped by order_id (one row per order per state)
 -- so order-level review scores are not inflated by item count.
 WITH orders AS (

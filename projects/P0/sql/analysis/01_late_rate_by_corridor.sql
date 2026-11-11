@@ -1,5 +1,6 @@
 -- Q1a: Which seller-to-customer state corridors have the highest late-delivery rates?
--- Corridors with fewer than 30 delivered items are excluded to remove small-volume noise.
+-- Compare rates and item volumes to prioritise corridor investigations.
+-- Corridors with fewer than 30 delivered items are excluded to reduce small-volume noise.
 -- Join uses seller_key (not seller_id) so each item is bound to the tier version valid
 -- at purchase date; using seller_id alone would multiply rows across all history versions.
 SELECT

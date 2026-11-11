@@ -1,20 +1,24 @@
 -- Q4: How does freight charged relative to item price relate to customer satisfaction?
 -- Pearson correlation between order_freight_ratio and review_score at the order level.
--- order_delivery supplies one row per order so the ratio and score are not inflated
--- by multi-item orders.  Freight ratio is the carrier charge divided by item price;
--- it is not the platform's cost and is not a proxy for lost revenue.
+-- Deduplicate the fact/date join so multi-item orders do not receive extra weight.
+-- Freight ratio is total order freight charged divided by order merchandise value;
+-- it is not the carrier's shipping cost and is not a proxy for lost revenue.
 -- A negative correlation indicates association only; unmeasured factors such as
 -- product quality and seller communication also drive review scores.
 
--- Correlation summary
+-- Correlation summary: reviewed delivered orders with known purchase dates and ratios.
+WITH orders AS (
+  SELECT DISTINCT f.order_id, f.order_freight_ratio, f.review_score
+  FROM `${PROJECT}.${WAREHOUSE}.fact_order_item` AS f
+  JOIN `${PROJECT}.${WAREHOUSE}.dim_date` AS d ON d.date_key = f.purchase_date_key
+  WHERE f.is_delivered AND f.review_score IS NOT NULL
+    AND f.order_freight_ratio IS NOT NULL AND d.date IS NOT NULL
+)
 SELECT
   ROUND(CORR(CAST(order_freight_ratio AS FLOAT64),
              CAST(review_score        AS FLOAT64)), 4) AS pearson_r,
   COUNT(*)                                             AS n
-FROM `${PROJECT}.${WAREHOUSE}.order_delivery`
-WHERE review_score        IS NOT NULL
-  AND order_freight_ratio IS NOT NULL
-  AND is_delivered;
+FROM orders;
 
 -- Bucketed breakdown (run separately to see avg score per freight tier)
 -- SELECT

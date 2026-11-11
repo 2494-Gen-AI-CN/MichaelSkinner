@@ -1,4 +1,6 @@
 -- Q5: How do seller outcomes compare across periods under the simulated watchlist policy?
+-- Compare item-level outcomes under the tier valid at purchase to support seller reviews.
+-- Review averages here are item-weighted. A seller can appear in both tier groups.
 -- dim_seller records one row per seller per tier-change interval (SCD type 2).
 -- fact_order_item already stores the seller_key bound to the version valid at purchase_date,
 -- so joining via seller_key (not seller_id) gives the correct tier for each transaction.

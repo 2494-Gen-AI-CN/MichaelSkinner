@@ -1,7 +1,8 @@
 -- Q1b: Which product categories have the highest late-delivery rates?
--- Categories with fewer than 50 delivered items are excluded to remove small-volume noise.
--- 610 products have missing categories; they are labelled unknown and excluded here
--- because the category label is the unit of analysis.
+-- Use item-weighted rates to identify categories for delivery-quality review.
+-- Categories with fewer than 50 delivered items are excluded to reduce small-volume noise.
+-- Known products without a category remain labelled unknown. Only the separate
+-- unknown product-reference member is excluded, not the unknown-category group.
 SELECT
   COALESCE(dp.category_en, 'unknown')                       AS category,
   COUNT(*)                                                  AS delivered_items,
