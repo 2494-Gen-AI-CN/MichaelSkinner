@@ -1,0 +1,6 @@
+*.md
+*.png
+.venv
+.vscode
+.pytest_cache
+.ipynb_checkpoints
